@@ -26,12 +26,15 @@ WND_CLASS = "GM3323DBatteryTrayWnd"
 MUTEX_NAME = "Global\\GM3323DBatteryTray_single_instance"
 
 # 界面标题（托盘用它来找到已打开的窗口）
-UI_TITLE = "鼠标与蓝牙耳机电量"
+UI_TITLE = "外设电量"
 
 DEFAULT_CONFIG = {
     "interval": 60,        # 托盘轮询间隔（秒）
     "autostart": False,     # 开机自启
     "headset": "auto",    # auto / all / exact paired headset name
+    "theme": "graphite",
+    "icon_style": "ring",
+    "auto_refresh": True,
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
@@ -69,6 +72,17 @@ def load_config() -> dict:
                     cfg[k] = data[k]
     except Exception:
         pass
+    if cfg["theme"] not in ("graphite", "cloud", "midnight", "forest"):
+        cfg["theme"] = "graphite"
+    if cfg["icon_style"] not in ("ring", "digits"):
+        cfg["icon_style"] = "ring"
+    if type(cfg["interval"]) is not int or cfg["interval"] not in dict(INTERVAL_CHOICES):
+        cfg["interval"] = DEFAULT_CONFIG["interval"]
+    for key in ("auto_refresh", "autostart"):
+        if not isinstance(cfg[key], bool):
+            cfg[key] = DEFAULT_CONFIG[key]
+    if not isinstance(cfg["headset"], str) or not cfg["headset"].strip():
+        cfg["headset"] = "auto"
     return cfg
 
 

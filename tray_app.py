@@ -25,6 +25,7 @@ import hid_win as hw
 import gm3323d_proto as gm
 import headset_battery as hb
 import win_icon
+import skins
 import tray_common as tc
 
 BASE_DIR = tc.BASE_DIR
@@ -179,15 +180,8 @@ class TrayApp:
             print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
 
     # ---- 图标 ----------------------------------------------------------
-    @staticmethod
-    def _color(level: Optional[int]) -> tuple[int, int, int]:
-        if level is None:
-            return (150, 155, 160)
-        if level >= 60:
-            return (93, 220, 138)
-        if level >= 30:
-            return (245, 196, 81)
-        return (255, 107, 107)
+    def _color(self, level: Optional[int]) -> tuple[int, int, int]:
+        return skins.rgb(skins.level_color(level, skins.get_skin(self.cfg["theme"])))
 
     def _nid(self, uID: int):
         nid = NOTIFYICONDATAW()
@@ -203,7 +197,12 @@ class TrayApp:
         level, err = self.levels[key]
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
-        nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
+        skin = skins.get_skin(self.cfg["theme"])
+        if self.cfg["icon_style"] == "ring":
+            nid.hIcon = win_icon.make_ring_hicon(level, self._color(level), plate,
+                                               skins.rgb(skin["track"]), skins.rgb(skin["fg"]))
+        else:
+            nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
         source = "10% 分档" if key == "mouse" else err
         nid.szTip = (f"{title}：{level}%（{source}，{time.strftime('%H:%M:%S')} 读取）"
                      if level is not None else f"{title}：{err or '未知'}")
@@ -234,7 +233,8 @@ class TrayApp:
         if not self.hwnd:
             return
         USER32.KillTimer(self.hwnd, 1)
-        USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
+        if self.cfg["auto_refresh"]:
+            USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
 
     def apply_config(self) -> None:
         """同步界面里改过的设置。
@@ -243,14 +243,17 @@ class TrayApp:
         （早先的版本会自动"纠正"，结果一次读到不一致就把用户的启动项删了。）
         """
         new = tc.load_config()
-        changed = new["interval"] != self.cfg["interval"]
+        changed = (new["interval"], new["auto_refresh"]) != (self.cfg["interval"], self.cfg["auto_refresh"])
         headset_changed = new["headset"] != self.cfg["headset"]
+        appearance_changed = (new["theme"], new["icon_style"]) != (self.cfg["theme"], self.cfg["icon_style"])
         self.cfg = new
         if changed:
             self.log(f"刷新间隔 -> {new['interval']} 秒")
             self.apply_timer()
         if headset_changed:
             self.refresh_now()
+        if appearance_changed:
+            self.update_icons()
 
         actual = tc.is_autostart_enabled()
         if bool(self.cfg.get("autostart")) != actual:
