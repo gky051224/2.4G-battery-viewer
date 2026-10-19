@@ -10,6 +10,7 @@ from tkinter import font as tkfont
 
 import skins
 import tray_common as tc
+import app_identity
 
 FONT = "Microsoft YaHei UI"
 
@@ -102,7 +103,9 @@ class BatteryWindow:
     def __init__(self, reader):
         self.reader, self.cfg = reader, tc.load_config()
         self.skin = skins.get_skin(self.cfg["theme"])
+        app_identity.set_process_identity()
         self.root = tk.Tk()
+        app_identity.set_window_icon(self.root)
         self.root.battery_app = self
         self.root.title(tc.UI_TITLE)
         self.root.geometry("800x620")
@@ -124,6 +127,7 @@ class BatteryWindow:
         self.reschedule()
         self.root.after(100, self.refresh)
         self.root.after(150, self.pump)
+        self.root.after(0, self.start_tray)
 
     def _build(self):
         self.outer = ttk.Frame(self.root, style="Page.TFrame", padding=(28, 24, 28, 20))
@@ -281,7 +285,8 @@ class BatteryWindow:
                     self.starting_tray = False
                     if ok and hide:
                         self.root.withdraw()
-                    self.status.configure(text="已收起到系统托盘" if ok else "托盘未能启动，请重试")
+                    self.status.configure(text=("已收起到系统托盘" if hide else "托盘已启动")
+                                          if ok else "托盘未能启动，请点击“收起”重试")
                     if self.settings and self.settings.winfo_exists():
                         self.build_settings()
                 elif kind == "choices":
@@ -350,6 +355,7 @@ class BatteryWindow:
             self.settings.lift()
             return
         self.settings = tk.Toplevel(self.root)
+        app_identity.set_window_icon(self.settings)
         self.settings.title("偏好设置")
         self.settings.transient(self.root)
         self.settings.resizable(False, False)
@@ -435,6 +441,7 @@ class BatteryWindow:
 
     def show_details(self):
         win = tk.Toplevel(self.root)
+        app_identity.set_window_icon(win)
         win.title("电量读取详情")
         win.transient(self.root)
         text = tk.Text(win, width=72, height=20, wrap="word", borderwidth=0, padx=20, pady=20,

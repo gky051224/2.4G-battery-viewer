@@ -16,6 +16,7 @@ from typing import Optional
 
 import win_link
 import win_shell
+import app_identity
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "tray_config.json")
@@ -224,7 +225,8 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="GM3323D 电量托盘：常驻显示鼠标电量")
+            description="GM3323D 电量托盘：常驻显示鼠标电量",
+            icon=str(app_identity.ICON_PATH))
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
