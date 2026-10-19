@@ -26,11 +26,12 @@ WND_CLASS = "GM3323DBatteryTrayWnd"
 MUTEX_NAME = "Global\\GM3323DBatteryTray_single_instance"
 
 # 界面标题（托盘用它来找到已打开的窗口）
-UI_TITLE = "GM3323D 电量查看器"
+UI_TITLE = "鼠标与蓝牙耳机电量"
 
 DEFAULT_CONFIG = {
     "interval": 60,        # 托盘轮询间隔（秒）
     "autostart": False,     # 开机自启
+    "headset": "auto",    # auto / all / exact paired headset name
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),

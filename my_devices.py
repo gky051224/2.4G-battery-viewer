@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""我的设备电量 —— GM3323D 简洁面板
+"""我的设备电量 —— GM3323D 与蓝牙耳机简洁面板
 
 用法：
     python my_devices.py            打开界面（默认自动刷新）
     python my_devices.py --once     命令行读一次就退出
 
-显示 GM3323D 电量，可自动刷新；仅监听接收器的只读电量报文。
+显示 GM3323D 和蓝牙耳机电量，可自动刷新。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import gm3323d_proto as gm
+import headset_battery as hb
 import tray_common as tc
 import win_link
 
@@ -55,7 +56,16 @@ def read_gm3323d() -> Reading:
 
 
 def read_all() -> list[Reading]:
-    return [read_gm3323d()]
+    selection = tc.load_config()["headset"]
+    # Check headset connection after waiting for the mouse, so its state is fresh.
+    mouse = read_gm3323d()
+    headsets = [Reading(
+        title=result.name, subtitle="蓝牙耳机 · 已连接" if result.connected else "蓝牙耳机 · 未连接",
+        level=result.level, detail=result.detail if result.level is not None else "",
+        error=result.detail if result.level is None else "",
+        extra="显示 Windows 最近收到的耳机电量上报值。" if result.level is not None else "",
+    ) for result in hb.selected_headsets(selection)]
+    return [mouse, *headsets]
 
 
 # ==========================================================================
@@ -120,13 +130,14 @@ class DeviceCard:
         self.bar.pack(fill="x", pady=(10, 8))
 
         self.lab_detail = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                    wraplength=610, justify="left")
+                                    wraplength=310, justify="left")
         self.lab_detail.pack(anchor="w")
         self.lab_extra = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                   wraplength=610, justify="left")
+                                   wraplength=310, justify="left")
         self.lab_extra.pack(anchor="w", pady=(4, 0))
 
     def update(self, r: Reading) -> None:
+        self.lab_title.configure(text=r.title)
         self.lab_sub.configure(text=r.subtitle)
         if r.ok:
             self.lab_level.configure(text=f"{r.level}%",
@@ -151,8 +162,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("720x490")
-    root.minsize(700, 470)
+    root.geometry("900x560")
+    root.minsize(860, 540)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -183,7 +194,7 @@ def build_ui():
     style.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
                     foreground=FG)
 
-    state = {"busy": False, "auto": True, "interval": 60, "after_id": None,
+    state = {"busy": False, "pending": False, "auto": True, "interval": 60, "after_id": None,
              "starting": False, "started_at": 0.0}
     # Tkinter 不是线程安全的：后台线程只往队列里放结果，主线程统一取出来处理
     results: "queue.Queue[tuple]" = queue.Queue()
@@ -212,11 +223,23 @@ def build_ui():
     # ---- 卡片 ----
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
-    body.columnconfigure(0, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
+    cards = []
 
-    card_mouse = DeviceCard(body, "戴记严选 GM3323D")
-    card_mouse.frame.grid(row=0, column=0, sticky="nsew")
+    def ensure_cards(count):
+        if len(cards) == count:
+            return
+        for card in cards:
+            card.frame.destroy()
+        for index in range(len(cards)):
+            body.columnconfigure(index, weight=0)
+        cards.clear()
+        for index in range(count):
+            body.columnconfigure(index, weight=1, uniform="card")
+            card = DeviceCard(body, "GM3323D 鼠标" if index == 0 else "蓝牙耳机")
+            card.frame.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 8, 0))
+            cards.append(card)
+    ensure_cards(2)
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
 
@@ -331,6 +354,8 @@ def build_ui():
     row_a.pack(fill="x")
     row_b = ttk.Frame(setbar, style="Panel.TFrame")
     row_b.pack(fill="x", pady=(9, 0))
+    row_c = ttk.Frame(setbar, style="Panel.TFrame")
+    row_c.pack(fill="x", pady=(9, 0))
 
     ttk.Label(row_a, text="设置", style="CardTitle.TLabel").pack(side="left")
     ttk.Label(row_a, text="刷新间隔", style="CardSub.TLabel").pack(side="left", padx=(16, 6))
@@ -343,38 +368,68 @@ def build_ui():
     ttk.Checkbutton(row_a, text="开机自启（任务管理器可见）", variable=v_boot,
                     command=on_boot).pack(side="left", padx=(18, 0))
 
-    btn_tray = ttk.Button(row_b, text="退出托盘程序", command=on_tray_toggle)
+    headset_choices = {"自动选择已连接耳机": "auto", "全部已配对耳机": "all"}
+    for headset in hb.read_headsets():
+        if headset.name != "蓝牙耳机":
+            headset_choices[headset.name] = headset.name
+    selected = cfg["headset"]
+    if selected not in headset_choices.values():
+        headset_choices[selected] = selected
+    v_headset = tk.StringVar(value=next(k for k, v in headset_choices.items() if v == selected))
+    ttk.Label(row_b, text="蓝牙耳机", style="CardSub.TLabel").pack(side="left")
+    combo_headset = ttk.Combobox(row_b, textvariable=v_headset, state="readonly", width=36,
+                                 values=list(headset_choices))
+    combo_headset.pack(side="left", padx=(12, 0))
+
+    def on_headset(_event=None):
+        cfg["headset"] = headset_choices[v_headset.get()]
+        tc.save_config(cfg)
+        tc.post_to_tray(tc.MSG_RELOAD)
+        refresh()
+    combo_headset.bind("<<ComboboxSelected>>", on_headset)
+
+    btn_tray = ttk.Button(row_c, text="退出托盘程序", command=on_tray_toggle)
     btn_tray.pack(side="right")
-    btn_link = ttk.Button(row_b, text="重建桌面链接", command=on_links)
+    btn_link = ttk.Button(row_c, text="重建桌面链接", command=on_links)
     btn_link.pack(side="right", padx=(0, 8))
-    lab_tray = ttk.Label(row_b, text="", style="CardSub.TLabel")
+    lab_tray = ttk.Label(row_c, text="", style="CardSub.TLabel")
     lab_tray.pack(side="right", padx=(0, 12))
     refresh_tray_state()
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_mouse.update(readings[0])
+        ensure_cards(len(readings))
+        for card, reading in zip(cards, readings):
+            wrap = max(180, (root.winfo_width() - 52) // len(cards) - 40)
+            card.lab_detail.configure(wraplength=wrap)
+            card.lab_extra.configure(wraplength=wrap)
+            card.update(reading)
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/1 个设备"
+                            f"成功读取 {ok}/{len(readings)} 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
+        if state["pending"]:
+            state["pending"] = False
+            root.after(0, refresh)
 
     def worker():
         try:
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("GM3323D 鼠标", "", error="读取异常，请重新插拔接收器")]
+            readings = [Reading("GM3323D 鼠标", "", error="读取异常，请重新插拔接收器"),
+                        Reading("蓝牙耳机", "", error="读取异常，请重新连接耳机")]
         results.put(("readings", readings))
 
     def refresh():
         if state["busy"]:
+            state["pending"] = True
             return
         state["busy"] = True
         btn.configure(state="disabled")
-        foot.configure(text="正在等待鼠标上报电量…（最多 5 秒）")
+        foot.configure(text="正在刷新鼠标和蓝牙耳机电量…（最多 5 秒）")
         threading.Thread(target=worker, daemon=True).start()
 
     def _reschedule():

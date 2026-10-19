@@ -134,10 +134,14 @@ def _read_battery_property(hdev, info) -> tuple[Optional[int], bool, str]:
         if err == ERROR_NOT_FOUND:
             return None, False, "该设备没有电池属性（耳机可能未连接或不上报电量）"
         return None, False, f"读取失败 err={err}"
+    if ptype.value != 0x03:  # DEVPROP_TYPE_BYTE
+        return None, True, "电池属性类型无效，无法确认电量"
     level = int(value.value)
     if level == 0:
         return 0, True, "属性存在但值为 0（通常表示未连接或未上报）"
-    return min(100, level), True, "来自蓝牙 HFP 电量上报"
+    if level > 100:
+        return None, True, "电池属性超出 0–100 范围，无法确认电量"
+    return level, True, "来自蓝牙 HFP 电量上报"
 
 
 def list_bluetooth_devices() -> list[BluetoothDevice]:

@@ -23,6 +23,7 @@ from typing import Optional
 
 import hid_win as hw
 import gm3323d_proto as gm
+import headset_battery as hb
 import win_icon
 import tray_common as tc
 
@@ -138,7 +139,8 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [(1, "mouse", "GM3323D 鼠标", False)]
+TRAY_ICONS = [(1, "mouse", "GM3323D 鼠标", False),
+              (2, "headset_0", "蓝牙耳机", True)]
 
 
 def read_mouse() -> tuple[Optional[int], str]:
@@ -156,6 +158,9 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
+        self.refresh_pending = False
+        self.tray_icons = list(TRAY_ICONS)
+        self.pending_results = []
         self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
@@ -199,12 +204,13 @@ class TrayApp:
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
         nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = (f"{title}：{level}%（10% 分档，{time.strftime('%H:%M:%S')} 更新）"
+        source = "10% 分档" if key == "mouse" else "Windows 蓝牙上报"
+        nid.szTip = (f"{title}：{level}%（{source}，{time.strftime('%H:%M:%S')} 更新）"
                      if level is not None else f"{title}：{err or '未知'}")
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.tray_icons:
             ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
             self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
         self.icons_added = True
@@ -213,11 +219,11 @@ class TrayApp:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.tray_icons:
             self._apply_icon(NIM_MODIFY, uID, key, title, plate)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
+        for uID, _, _, _ in self.tray_icons:
             nid = self._nid(uID)
             nid.uFlags = 0
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
@@ -238,10 +244,13 @@ class TrayApp:
         """
         new = tc.load_config()
         changed = new["interval"] != self.cfg["interval"]
+        headset_changed = new["headset"] != self.cfg["headset"]
         self.cfg = new
         if changed:
             self.log(f"刷新间隔 -> {new['interval']} 秒")
             self.apply_timer()
+        if headset_changed:
+            self.refresh_now()
 
         actual = tc.is_autostart_enabled()
         if bool(self.cfg.get("autostart")) != actual:
@@ -251,24 +260,49 @@ class TrayApp:
             self.log(f"开机自启实际为 {actual}，已同步到配置（未改动系统设置）")
 
     def refresh_now(self) -> None:
-        if self.busy or not self.hwnd:
+        if not self.hwnd:
+            return
+        if self.busy:
+            self.refresh_pending = True
             return
         self.busy = True
         threading.Thread(target=self._worker, args=(self.hwnd,), daemon=True).start()
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
+            mouse = read_mouse()
         except Exception:
-            self.levels["mouse"] = (None, "读取失败，请重新插拔接收器")
+            mouse = (None, "读取失败，请重新插拔接收器")
             self.log("读取异常:\n" + traceback.format_exc())
+        results = [(1, "mouse", "GM3323D 鼠标", False, mouse)]
+        try:
+            headsets = hb.selected_headsets(self.cfg["headset"])
+        except Exception:
+            headsets = [hb.HeadsetReading("蓝牙耳机", detail="无法读取耳机，请重新连接")]
+            self.log("耳机读取异常:\n" + traceback.format_exc())
+        for index, headset in enumerate(headsets):
+            results.append((index + 2, f"headset_{index}", headset.name, True,
+                            (headset.level, headset.detail)))
+        self.pending_results = results
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m = self.levels["mouse"]
-        self.log(f"刷新完成：GM3323D={m[0]}（{m[1] or 'ok'}）")
-        self.update_icons()
+        old_ids = {item[0] for item in self.tray_icons}
+        new_ids = {item[0] for item in self.pending_results}
+        for removed in old_ids - new_ids:
+            nid = self._nid(removed)
+            nid.uFlags = 0
+            SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+        self.tray_icons = [item[:4] for item in self.pending_results]
+        self.levels = {item[1]: item[4] for item in self.pending_results}
+        for uid, key, title, plate in self.tray_icons:
+            self._apply_icon(NIM_MODIFY if uid in old_ids else NIM_ADD,
+                             uid, key, title, plate)
+        self.log(f"刷新完成：{self.levels}")
+        if self.refresh_pending:
+            self.refresh_pending = False
+            self.refresh_now()
 
     # ---- 打开简洁界面 ---------------------------------------------------
     def open_ui(self) -> None:
