@@ -63,7 +63,8 @@ def read_all() -> list[Reading]:
         title=result.name, subtitle="蓝牙耳机 · 已连接" if result.connected else "蓝牙耳机 · 未连接",
         level=result.level, detail=result.detail if result.level is not None else "",
         error=result.detail if result.level is None else "",
-        extra="显示 Windows 最近收到的耳机电量上报值。" if result.level is not None else "",
+        extra=("每次刷新直接向耳机查询，已校验回复。" if result.direct else
+               "系统参考值，可能存在延迟；不代表刚刚从耳机读到。") if result.level is not None else "",
     ) for result in hb.selected_headsets(selection)]
     return [mouse, *headsets]
 
@@ -429,7 +430,7 @@ def build_ui():
             return
         state["busy"] = True
         btn.configure(state="disabled")
-        foot.configure(text="正在刷新鼠标和蓝牙耳机电量…（最多 5 秒）")
+        foot.configure(text="正在刷新鼠标和蓝牙耳机电量…请稍候")
         threading.Thread(target=worker, daemon=True).start()
 
     def _reschedule():

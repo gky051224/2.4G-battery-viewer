@@ -204,8 +204,8 @@ class TrayApp:
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
         nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        source = "10% 分档" if key == "mouse" else "Windows 蓝牙上报"
-        nid.szTip = (f"{title}：{level}%（{source}，{time.strftime('%H:%M:%S')} 更新）"
+        source = "10% 分档" if key == "mouse" else err
+        nid.szTip = (f"{title}：{level}%（{source}，{time.strftime('%H:%M:%S')} 读取）"
                      if level is not None else f"{title}：{err or '未知'}")
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 

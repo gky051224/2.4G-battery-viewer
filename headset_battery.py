@@ -1,7 +1,7 @@
-"""Bluetooth headset readings with connection checks to reject cached batteries."""
+"""Bluetooth battery readings; tested Edifier models use a live battery query."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import re
 from typing import Optional
 
@@ -12,6 +12,8 @@ class HeadsetReading:
     level: Optional[int] = None
     connected: bool = False
     detail: str = ""
+    direct: bool = False
+    address: str = field(default="", repr=False, compare=False)
 
 
 def clean_name(name: str) -> str:
@@ -43,7 +45,8 @@ def combine(nodes, states: dict[str, bool], selected_name: str = "") -> list[Hea
             result = HeadsetReading(name, connected=True,
                                     detail="已连接，Windows 尚未收到有效电量")
         else:
-            result = HeadsetReading(name, level, True, "来自 Windows 蓝牙电量上报")
+            result = HeadsetReading(name, level, True, "Windows 系统参考值，更新时间无法确认")
+        result = replace(result, address=address)
         # Prefer a valid connected value over a duplicate profile without data.
         previous = found.get(key)
         if previous is None or (previous.level is None and result.level is not None):
@@ -57,8 +60,23 @@ def combine(nodes, states: dict[str, bool], selected_name: str = "") -> list[Hea
 def read_headsets(selected_name: str = "") -> list[HeadsetReading]:
     import bt_battery as bt
     import win_bluetooth
+    import edifier_proto
     try:
-        return combine(bt.displayable_devices(), win_bluetooth.connection_states(), selected_name)
+        nodes = bt.displayable_devices()
+        readings = combine(nodes, win_bluetooth.connection_states(), selected_name)
+        results = []
+        for reading in readings:
+            if reading.name not in edifier_proto.SUPPORTED_NAMES or not reading.connected:
+                results.append(reading)
+                continue
+            live = edifier_proto.read_battery(reading.address)
+            if live.level is not None:
+                results.append(replace(reading, level=live.level, detail=live.detail, direct=True))
+            else:
+                reference = (f"；Windows 参考值 {reading.level}%（可能未更新）"
+                             if reading.level is not None else "")
+                results.append(replace(reading, level=None, detail=live.detail + reference))
+        return results
     except OSError as exc:
         return [HeadsetReading(selected_name or "蓝牙耳机", detail=f"无法读取蓝牙状态：{exc}")]
 
