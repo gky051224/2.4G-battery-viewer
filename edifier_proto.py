@@ -141,6 +141,9 @@ def read_battery(address: str, timeout: float = 3.0) -> Reading:
     deadline = time.monotonic() + timeout
     try:
         with _query_lock(address, deadline):
+            # Waiting behind the tray must not consume the panel's I/O budget.
+            # Each phase is bounded, so a simultaneous refresh can still succeed.
+            deadline = time.monotonic() + timeout
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
