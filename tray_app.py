@@ -1,26 +1,11 @@
 # -*- coding: utf-8 -*-
-"""tray_app.py —— 托盘电量监视器（纯 ctypes，无第三方依赖）
+"""GM3323D 托盘电量监视器。仅监听 Input Report，不发送设备命令。
 
-界面约定
---------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
-  图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
-* **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
-* 左键图标 → 立刻刷新一次。
-* 悬停显示 tooltip：设备名 + 电量 + 更新时间。
-
-其它
-----
-* 开机自启用「启动」文件夹里的快捷方式（`电量托盘.lnk`，任务管理器可见）+ pythonw.exe。
-* 低 CPU：SetTimer 驱动，空闲不轮询；读取在后台线程；默认 60 秒一轮。
-* **不写日志文件**：只有 `--debug` 时才往控制台打印。
-* 全 ctypes 调 shell32/user32，不依赖 pystray / Pillow。
-
-启动：
-    pythonw tray_app.py        # 静默驻留（开机自启用的就是这个）
-    python  tray_app.py --debug   # 前台运行并打印过程信息（排查问题用）
-    python  tray_app.py --status
-    python  tray_app.py --quit
+pythonw tray_app.py          静默运行
+python tray_app.py --debug   前台排查
+python tray_app.py --status  查看状态
+python tray_app.py --quit    退出托盘
+右键打开面板，左键刷新，悬停显示电量和更新时间。
 """
 
 from __future__ import annotations
@@ -37,9 +22,10 @@ from ctypes import wintypes
 from typing import Optional
 
 import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import gm3323d_proto as gm
+import headset_battery as hb
 import win_icon
+import skins
 import tray_common as tc
 
 BASE_DIR = tc.BASE_DIR
@@ -154,41 +140,13 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
-]
-
-
-# --------------------------------------------------------------------------
-# 设备读取（轻量版）
-# --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
+TRAY_ICONS = [(1, "mouse", "GM3323D 鼠标", False),
+              (2, "headset_0", "蓝牙耳机", True)]
 
 
 def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
-    try:
-        res = bt.strategy_vendor_protocol(iface)
-    except Exception as e:
-        return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
-        return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
+    result = gm.read_battery()
+    return result.level, result.detail
 
 
 # --------------------------------------------------------------------------
@@ -201,6 +159,9 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
+        self.refresh_pending = False
+        self.tray_icons = list(TRAY_ICONS)
+        self.pending_results = []
         self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
         self.icons_added = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
@@ -219,15 +180,8 @@ class TrayApp:
             print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
 
     # ---- 图标 ----------------------------------------------------------
-    @staticmethod
-    def _color(level: Optional[int]) -> tuple[int, int, int]:
-        if level is None:
-            return (150, 155, 160)
-        if level >= 60:
-            return (93, 220, 138)
-        if level >= 30:
-            return (245, 196, 81)
-        return (255, 107, 107)
+    def _color(self, level: Optional[int]) -> tuple[int, int, int]:
+        return skins.rgb(skins.level_color(level, skins.get_skin(self.cfg["theme"])))
 
     def _nid(self, uID: int):
         nid = NOTIFYICONDATAW()
@@ -243,13 +197,19 @@ class TrayApp:
         level, err = self.levels[key]
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
-        nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = (f"{title}：{level}%（{time.strftime('%H:%M:%S')} 更新）"
+        skin = skins.get_skin(self.cfg["theme"])
+        if self.cfg["icon_style"] == "ring":
+            nid.hIcon = win_icon.make_ring_hicon(level, self._color(level), plate,
+                                               skins.rgb(skin["track"]), skins.rgb(skin["fg"]))
+        else:
+            nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
+        source = "10% 分档" if key == "mouse" else err
+        nid.szTip = (f"{title}：{level}%（{source}，{time.strftime('%H:%M:%S')} 读取）"
                      if level is not None else f"{title}：{err or '未知'}")
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.tray_icons:
             ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
             self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
         self.icons_added = True
@@ -258,11 +218,11 @@ class TrayApp:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate in TRAY_ICONS:
+        for uID, key, title, plate in self.tray_icons:
             self._apply_icon(NIM_MODIFY, uID, key, title, plate)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
+        for uID, _, _, _ in self.tray_icons:
             nid = self._nid(uID)
             nid.uFlags = 0
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
@@ -273,7 +233,8 @@ class TrayApp:
         if not self.hwnd:
             return
         USER32.KillTimer(self.hwnd, 1)
-        USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
+        if self.cfg["auto_refresh"]:
+            USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
 
     def apply_config(self) -> None:
         """同步界面里改过的设置。
@@ -282,11 +243,17 @@ class TrayApp:
         （早先的版本会自动"纠正"，结果一次读到不一致就把用户的启动项删了。）
         """
         new = tc.load_config()
-        changed = new["interval"] != self.cfg["interval"]
+        changed = (new["interval"], new["auto_refresh"]) != (self.cfg["interval"], self.cfg["auto_refresh"])
+        headset_changed = new["headset"] != self.cfg["headset"]
+        appearance_changed = (new["theme"], new["icon_style"]) != (self.cfg["theme"], self.cfg["icon_style"])
         self.cfg = new
         if changed:
             self.log(f"刷新间隔 -> {new['interval']} 秒")
             self.apply_timer()
+        if headset_changed:
+            self.refresh_now()
+        if appearance_changed:
+            self.update_icons()
 
         actual = tc.is_autostart_enabled()
         if bool(self.cfg.get("autostart")) != actual:
@@ -296,24 +263,49 @@ class TrayApp:
             self.log(f"开机自启实际为 {actual}，已同步到配置（未改动系统设置）")
 
     def refresh_now(self) -> None:
-        if self.busy or not self.hwnd:
+        if not self.hwnd:
+            return
+        if self.busy:
+            self.refresh_pending = True
             return
         self.busy = True
         threading.Thread(target=self._worker, args=(self.hwnd,), daemon=True).start()
 
     def _worker(self, hwnd: int) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            mouse = read_mouse()
         except Exception:
+            mouse = (None, "读取失败，请重新插拔接收器")
             self.log("读取异常:\n" + traceback.format_exc())
+        results = [(1, "mouse", "GM3323D 鼠标", False, mouse)]
+        try:
+            headsets = hb.selected_headsets(self.cfg["headset"])
+        except Exception:
+            headsets = [hb.HeadsetReading("蓝牙耳机", detail="无法读取耳机，请重新连接")]
+            self.log("耳机读取异常:\n" + traceback.format_exc())
+        for index, headset in enumerate(headsets):
+            results.append((index + 2, f"headset_{index}", headset.name, True,
+                            (headset.level, headset.detail)))
+        self.pending_results = results
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
-        self.update_icons()
+        old_ids = {item[0] for item in self.tray_icons}
+        new_ids = {item[0] for item in self.pending_results}
+        for removed in old_ids - new_ids:
+            nid = self._nid(removed)
+            nid.uFlags = 0
+            SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+        self.tray_icons = [item[:4] for item in self.pending_results]
+        self.levels = {item[1]: item[4] for item in self.pending_results}
+        for uid, key, title, plate in self.tray_icons:
+            self._apply_icon(NIM_MODIFY if uid in old_ids else NIM_ADD,
+                             uid, key, title, plate)
+        self.log(f"刷新完成：{self.levels}")
+        if self.refresh_pending:
+            self.refresh_pending = False
+            self.refresh_now()
 
     # ---- 打开简洁界面 ---------------------------------------------------
     def open_ui(self) -> None:
@@ -436,7 +428,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里的数字图标就是它；右键图标打开界面）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()

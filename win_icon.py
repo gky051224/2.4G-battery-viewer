@@ -11,12 +11,14 @@ from __future__ import annotations
 import ctypes
 import os
 import struct
+import math
 import tempfile
 from ctypes import wintypes
 from typing import Optional
 
 # ---- 3x5 点阵数字（每行 3 位，"1" 点亮）----
 DIGITS = {
+    "-": ("000", "000", "111", "000", "000"),
     "0": ("111", "101", "101", "101", "111"),
     "1": ("010", "110", "010", "010", "111"),
     "2": ("111", "001", "111", "100", "111"),
@@ -151,7 +153,7 @@ user32.LoadImageW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, wintypes.UINT,
 user32.DestroyIcon.restype = wintypes.BOOL
 user32.DestroyIcon.argtypes = [ctypes.c_void_p]
 
-SIZES = (16, 24, 32)
+SIZES = (16, 20, 24, 32, 48)
 _icon_cache: dict[tuple, int] = {}
 _tmp_dir: Optional[str] = None
 
@@ -159,8 +161,7 @@ _tmp_dir: Optional[str] = None
 def _ensure_tmp() -> str:
     global _tmp_dir
     if _tmp_dir is None:
-        _tmp_dir = os.path.join(tempfile.gettempdir(), "device_battery_icons")
-        os.makedirs(_tmp_dir, exist_ok=True)
+        _tmp_dir = tempfile.mkdtemp(prefix="device_battery_icons_")
     return _tmp_dir
 
 
@@ -184,6 +185,76 @@ def make_hicon(text: str, color: tuple[int, int, int], plate: bool = False) -> i
     return hicon
 
 
+def render_ring_rgba(level: Optional[int], size: int, color: tuple[int, int, int],
+                     headset: bool = False, track=(83, 92, 106), ink=(240, 245, 250)) -> bytes:
+    """Antialiased percentage arc plus a small mouse/headset glyph, no rounding."""
+    samples = 4
+    high = size * samples
+    pixels = bytearray(high * high * 4)
+    center = high / 2
+    outer, inner = high * .465, high * .335
+    fraction = 0 if level is None else max(0, min(100, level)) / 100
+    for y in range(high):
+        for x in range(high):
+            dx, dy = x+.5-center, y+.5-center
+            distance = math.hypot(dx, dy)
+            rgba = None
+            if inner <= distance <= outer:
+                angle = (math.atan2(dy, dx) + math.pi/2) % (2*math.pi)
+                rgba = (*color, 255) if angle < fraction * 2*math.pi else (*track, 210)
+            # Device glyphs are strokes rather than emoji or fonts.
+            nx, ny = dx / high, dy / high
+            if headset:
+                arc = .135 <= math.hypot(nx, ny+.005) <= .19 and ny < .02
+                ears = .12 <= abs(nx) <= .195 and -.015 <= ny <= .145
+                if arc or ears:
+                    rgba = (*ink, 255)
+            else:
+                mx, my = abs(nx), abs(ny)
+                border = ((.105 <= mx <= .15 and my <= .13)
+                          or (.12 <= my <= .185 and mx <= .1))
+                wheel = abs(nx) <= .025 and -.1 <= ny <= -.015
+                if border or wheel:
+                    rgba = (*ink, 255)
+            if rgba:
+                index = (y*high+x)*4
+                pixels[index:index+4] = bytes(rgba)
+    result = bytearray(size*size*4)
+    # Average premultiplied color so transparent edges do not acquire a black halo.
+    for y in range(size):
+        for x in range(size):
+            alpha = red = green = blue = 0
+            for sy in range(samples):
+                for sx in range(samples):
+                    i = (((y*samples+sy)*high)+(x*samples+sx))*4
+                    a = pixels[i+3]
+                    alpha += a
+                    red += pixels[i]*a
+                    green += pixels[i+1]*a
+                    blue += pixels[i+2]*a
+            if alpha:
+                i = (y*size+x)*4
+                result[i:i+4] = bytes((red//alpha, green//alpha, blue//alpha, alpha//(samples*samples)))
+    return bytes(result)
+
+
+def make_ring_hicon(level, color, headset=False, track=(83, 92, 106), ink=(240, 245, 250)) -> int:
+    key = ("ring", level, color, headset, track, ink)
+    if key in _icon_cache:
+        return _icon_cache[key]
+    images = [(s, render_ring_rgba(level, s, color, headset, track, ink)) for s in SIZES]
+    name = "ring_" + str(level) + "_" + str(int(headset)) + "_" + "".join(f"{v:02x}" for v in (*color, *track, *ink))
+    path = os.path.join(_ensure_tmp(), name + ".ico")
+    try:
+        with open(path, "wb") as output:
+            output.write(build_ico(images))
+        handle = user32.LoadImageW(None, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+    except OSError:
+        return 0
+    _icon_cache[key] = int(handle) if handle else 0
+    return _icon_cache[key]
+
+
 def destroy_all() -> None:
     for h in _icon_cache.values():
         if h:
@@ -203,6 +274,11 @@ def cleanup_files() -> None:
                 os.remove(os.path.join(_tmp_dir, name))
             except OSError:
                 pass
+        try:
+            os.rmdir(_tmp_dir)
+            _tmp_dir = None
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
