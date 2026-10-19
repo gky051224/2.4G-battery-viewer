@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""我的设备电量 —— 只显示 ATK 鼠标 + DARKRIM 耳机的简洁面板
+"""我的设备电量 —— GM3323D 简洁面板
 
 用法：
     python my_devices.py            打开界面（默认自动刷新）
     python my_devices.py --once     命令行读一次就退出
 
-界面只有两块卡片，各显示一个设备的电量，可自动刷新。
-底层复用 battery.py / darkrim_proto.py 里已经验证过的协议。
+显示 GM3323D 电量，可自动刷新；仅监听接收器的只读电量报文。
 """
 
 from __future__ import annotations
@@ -19,12 +18,9 @@ import traceback
 from dataclasses import dataclass
 from typing import Optional
 
-import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import gm3323d_proto as gm
 import tray_common as tc
 import win_link
-from hid_win import HidInterface
 
 
 # ==========================================================================
@@ -45,71 +41,21 @@ class Reading:
         return self.level is not None
 
 
-def _find(vid: int, usage_page: int, output_len: int = 0) -> Optional[HidInterface]:
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_atk() -> Reading:
-    """ATK / VXE 无线鼠标（内置协议 2）。"""
-    r = Reading("ATK 鼠标", "无接收器")
-    iface = _find(0x373B, 0xFF05, 64) or _find(0x373B, 0xFF02)
-    if iface is None:
-        r.error = "没找到接收器（请把 2.4G 接收器插上）"
-        return r
-    r.subtitle = f"{iface.vid_pid} · {iface.product or '2.4G 接收器'}"
-    try:
-        res = bt.strategy_vendor_protocol(iface) or bt.strategy_standard_battery_usage(iface)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if res is None:
-        r.error = "这台设备没有可用的读取方式"
-        return r
-    if res.ok:
-        r.level = res.level
-        r.status = res.status_text
-        r.detail = res.source
-    else:
-        r.error = res.detail or "读取失败"
-    return r
-
-
-def read_darkrim() -> Reading:
-    """DARKRIM SHADOW 耳机（杰理方案 dongle，逆向协议）。"""
-    r = Reading("DARKRIM 耳机", "未连接")
-    try:
-        info = drp.read_info(timeout=0.35)
-    except Exception as e:
-        r.error = f"读取出错：{e}"
-        return r
-    if not info.online:
-        r.error = info.detail or "没找到 dongle"
-        return r
-    r.subtitle = f"3654:6901 · {info.name or 'DARKRIM'}"
-    r.level = info.battery
-    r.status = ""
-    r.detail = "私有 TLV 协议（TLV 0x01 = 电量）"
-    bits = []
-    if info.dongle_firmware:
-        bits.append(f"dongle 固件 {info.dongle_firmware}")
-    if info.headset_firmware:
-        bits.append(f"耳机固件 {info.headset_firmware}")
-    if info.address:
-        bits.append(f"地址 {info.address}")
-    if info.status_code is not None:
-        bits.append(f"状态码 {info.status_code}")
-    r.extra = " · ".join(bits)
-    if r.level is None and not r.error:
-        r.error = "耳机没有上报电量（请确认耳机已开机并连上）"
-    return r
+def read_gm3323d() -> Reading:
+    result = gm.read_battery()
+    return Reading(
+        title="GM3323D 鼠标", subtitle="1D57:FA60 · 2.4G 无线接收器",
+        level=result.level,
+        status=("电量充足" if result.level >= 60 else
+                "电量中等" if result.level >= 30 else "电量偏低") if result.ok else "",
+        detail=result.detail if result.ok else "",
+        error=result.detail if not result.ok else "",
+        extra="鼠标每档上报 10%，显示值不是逐 1% 测量。" if result.ok else "",
+    )
 
 
 def read_all() -> list[Reading]:
-    return [read_atk(), read_darkrim()]
+    return [read_gm3323d()]
 
 
 # ==========================================================================
@@ -174,10 +120,10 @@ class DeviceCard:
         self.bar.pack(fill="x", pady=(10, 8))
 
         self.lab_detail = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                    wraplength=250, justify="left")
+                                    wraplength=610, justify="left")
         self.lab_detail.pack(anchor="w")
         self.lab_extra = ttk.Label(self.frame, text="", style="CardSub.TLabel",
-                                   wraplength=250, justify="left")
+                                   wraplength=610, justify="left")
         self.lab_extra.pack(anchor="w", pady=(4, 0))
 
     def update(self, r: Reading) -> None:
@@ -205,8 +151,8 @@ def build_ui():
     root = tk.Tk()
     root.title(tc.UI_TITLE)
     root.configure(bg=BG)
-    root.geometry("680x470")
-    root.minsize(620, 440)
+    root.geometry("720x490")
+    root.minsize(700, 470)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -267,14 +213,10 @@ def build_ui():
     body = ttk.Frame(root, padding=(18, 4, 18, 4))
     body.pack(fill="both", expand=True)
     body.columnconfigure(0, weight=1, uniform="card")
-    body.columnconfigure(1, weight=1, uniform="card")
     body.rowconfigure(0, weight=1)
 
-    card_atk = DeviceCard(body, "ATK 鼠标")
-    card_atk.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    card_dr = DeviceCard(body, "DARKRIM 耳机")
-    card_dr.frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-
+    card_mouse = DeviceCard(body, "戴记严选 GM3323D")
+    card_mouse.frame.grid(row=0, column=0, sticky="nsew")
     foot = ttk.Label(root, text="正在读取…", style="Muted.TLabel", padding=(18, 4))
     foot.pack(fill="x", side="bottom")
 
@@ -322,7 +264,7 @@ def build_ui():
         if want and not ok:
             notify("开机自启设置失败：无法创建启动文件夹快捷方式")
         elif want:
-            notify("已加入开机自启（任务管理器 →「启动」标签里能看到 电量托盘）", 12)
+            notify("已加入开机自启（任务管理器 →「启动」标签里能看到 GM3323D 电量托盘）", 12)
         else:
             notify("已取消开机自启")
 
@@ -330,7 +272,7 @@ def build_ui():
         state["starting"] = False
         refresh_tray_state()
         if not ok:
-            notify("启动失败：可双击桌面「电量托盘」再试", 12)
+            notify("启动失败：可双击 GM3323D-Tray.bat 再试", 12)
 
     def on_links():
         btn_link.configure(state="disabled", text="正在创建…")
@@ -411,11 +353,10 @@ def build_ui():
 
     # ---- 刷新逻辑 ----
     def apply(readings: list[Reading]):
-        card_atk.update(readings[0])
-        card_dr.update(readings[1])
+        card_mouse.update(readings[0])
         ok = sum(1 for r in readings if r.ok)
         foot.configure(text=f"更新于 {time.strftime('%H:%M:%S')}   "
-                            f"成功读取 {ok}/2 个设备"
+                            f"成功读取 {ok}/1 个设备"
                             + ("" if state["auto"] else "   （自动刷新已关闭）"))
         state["busy"] = False
         btn.configure(state="normal")
@@ -425,8 +366,7 @@ def build_ui():
             readings = read_all()
         except Exception:
             traceback.print_exc()
-            readings = [Reading("ATK 鼠标", "", error="读取异常"),
-                        Reading("DARKRIM 耳机", "", error="读取异常")]
+            readings = [Reading("GM3323D 鼠标", "", error="读取异常，请重新插拔接收器")]
         results.put(("readings", readings))
 
     def refresh():
@@ -434,7 +374,7 @@ def build_ui():
             return
         state["busy"] = True
         btn.configure(state="disabled")
-        foot.configure(text="正在读取…（耳机的协议要几秒钟）")
+        foot.configure(text="正在等待鼠标上报电量…（最多 5 秒）")
         threading.Thread(target=worker, daemon=True).start()
 
     def _reschedule():

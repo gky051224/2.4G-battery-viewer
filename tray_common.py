@@ -21,16 +21,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "tray_config.json")
 PID_FILE = os.path.join(BASE_DIR, "tray_pid.txt")
 
-APP_NAME = "DeviceBatteryTray"
-WND_CLASS = "DeviceBatteryTrayWnd"
-MUTEX_NAME = "Global\\DeviceBatteryTray_single_instance"
+APP_NAME = "GM3323DBatteryTray"
+WND_CLASS = "GM3323DBatteryTrayWnd"
+MUTEX_NAME = "Global\\GM3323DBatteryTray_single_instance"
 
 # 界面标题（托盘用它来找到已打开的窗口）
-UI_TITLE = "我的设备电量"
+UI_TITLE = "GM3323D 电量查看器"
 
 DEFAULT_CONFIG = {
     "interval": 60,        # 托盘轮询间隔（秒）
-    "autostart": True,     # 开机自启
+    "autostart": False,     # 开机自启
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
@@ -100,7 +100,7 @@ def autostart_command() -> str:
     return f'"{pythonw_path()}" "{tray_script()}"'
 
 
-STARTUP_LNK_NAME = "电量托盘.lnk"
+STARTUP_LNK_NAME = "GM3323D 电量托盘.lnk"
 
 # 任务管理器/系统用这个键记录启动项的"启用/禁用"状态
 #   值名 = 启动文件夹里的文件名；数据 12 字节，首字节 02=启用、03=禁用
@@ -209,7 +209,7 @@ def set_autostart(enabled: bool) -> bool:
             startup_lnk(), pythonw_path(),
             arguments=f'"{tray_script()}"',
             workdir=BASE_DIR,
-            description="设备电量托盘：常驻显示 ATK 鼠标 / DARKRIM 耳机电量")
+            description="GM3323D 电量托盘：常驻显示鼠标电量")
         _set_startup_approved(True)
     else:
         _clear_startup_approved()
@@ -238,8 +238,8 @@ def autostart_status() -> dict:
 # --------------------------------------------------------------------------
 # 桌面链接（软连接：目录 junction / 文件符号链接）
 # --------------------------------------------------------------------------
-DESKTOP_LINK_NAME = "设备电量查看器"          # 桌面上的项目文件夹链接名
-LAUNCHER_NAMES = ["我的设备电量.bat", "电量托盘.bat"]
+DESKTOP_LINK_NAME = "GM3323D-BatteryViewer"          # 桌面上的项目文件夹链接名
+LAUNCHER_NAMES = ["GM3323D.bat", "GM3323D-Tray.bat"]
 
 
 def desktop_dir() -> str:
@@ -290,8 +290,8 @@ def install_desktop_links() -> dict:
 # --------------------------------------------------------------------------
 # 进程间通信（窗口消息，双方都注册同名的 message）
 # --------------------------------------------------------------------------
-MSG_QUIT = "DeviceBatteryTray_Quit"       # 让托盘退出
-MSG_RELOAD = "DeviceBatteryTray_Reload"   # 让托盘重读配置
+MSG_QUIT = "GM3323DBatteryTray_Quit"       # 让托盘退出
+MSG_RELOAD = "GM3323DBatteryTray_Reload"   # 让托盘重读配置
 
 
 def tray_hwnd() -> int:

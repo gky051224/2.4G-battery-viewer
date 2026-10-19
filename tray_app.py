@@ -1,26 +1,11 @@
 # -*- coding: utf-8 -*-
-"""tray_app.py —— 托盘电量监视器（纯 ctypes，无第三方依赖）
+"""GM3323D 托盘电量监视器。仅监听 Input Report，不发送设备命令。
 
-界面约定
---------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
-  图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
-* **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
-* 左键图标 → 立刻刷新一次。
-* 悬停显示 tooltip：设备名 + 电量 + 更新时间。
-
-其它
-----
-* 开机自启用「启动」文件夹里的快捷方式（`电量托盘.lnk`，任务管理器可见）+ pythonw.exe。
-* 低 CPU：SetTimer 驱动，空闲不轮询；读取在后台线程；默认 60 秒一轮。
-* **不写日志文件**：只有 `--debug` 时才往控制台打印。
-* 全 ctypes 调 shell32/user32，不依赖 pystray / Pillow。
-
-启动：
-    pythonw tray_app.py        # 静默驻留（开机自启用的就是这个）
-    python  tray_app.py --debug   # 前台运行并打印过程信息（排查问题用）
-    python  tray_app.py --status
-    python  tray_app.py --quit
+pythonw tray_app.py          静默运行
+python tray_app.py --debug   前台排查
+python tray_app.py --status  查看状态
+python tray_app.py --quit    退出托盘
+右键打开面板，左键刷新，悬停显示电量和更新时间。
 """
 
 from __future__ import annotations
@@ -37,8 +22,7 @@ from ctypes import wintypes
 from typing import Optional
 
 import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import gm3323d_proto as gm
 import win_icon
 import tray_common as tc
 
@@ -154,41 +138,12 @@ KERNEL32.CreateMutexW.restype = ctypes.c_void_p
 KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
                                   wintypes.LPCWSTR]
 
-TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
-]
-
-
-# --------------------------------------------------------------------------
-# 设备读取（轻量版）
-# --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
+TRAY_ICONS = [(1, "mouse", "GM3323D 鼠标", False)]
 
 
 def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
-    try:
-        res = bt.strategy_vendor_protocol(iface)
-    except Exception as e:
-        return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
-        return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
+    result = gm.read_battery()
+    return result.level, result.detail
 
 
 # --------------------------------------------------------------------------
@@ -244,7 +199,7 @@ class TrayApp:
         text = str(level) if level is not None else "--"
         nid = self._nid(uID)
         nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = (f"{title}：{level}%（{time.strftime('%H:%M:%S')} 更新）"
+        nid.szTip = (f"{title}：{level}%（10% 分档，{time.strftime('%H:%M:%S')} 更新）"
                      if level is not None else f"{title}：{err or '未知'}")
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
@@ -304,15 +259,15 @@ class TrayApp:
     def _worker(self, hwnd: int) -> None:
         try:
             self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
         except Exception:
+            self.levels["mouse"] = (None, "读取失败，请重新插拔接收器")
             self.log("读取异常:\n" + traceback.format_exc())
         USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        m = self.levels["mouse"]
+        self.log(f"刷新完成：GM3323D={m[0]}（{m[1] or 'ok'}）")
         self.update_icons()
 
     # ---- 打开简洁界面 ---------------------------------------------------
@@ -436,7 +391,7 @@ def main() -> int:
         if tc.is_tray_running():
             # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（托盘里的数字图标就是它；右键图标打开界面）")
             return 0
         # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
         tc.cleanup_zombie()
